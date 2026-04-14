@@ -1,4 +1,4 @@
-module github.com/samimishal/response-cache
+module github.com/samishal1998/caddy-response-cache
 
 go 1.25.0
 

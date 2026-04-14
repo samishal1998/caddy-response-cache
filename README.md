@@ -38,15 +38,15 @@ go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 Clone the repo and build a Caddy binary that includes the plugin:
 
 ```sh
-git clone https://github.com/samimishal/response-cache.git
-cd response-cache
+git clone https://github.com/samishal1998/caddy-response-cache.git
+cd caddy-response-cache
 make build
 ```
 
 The `Makefile` wraps:
 
 ```sh
-xcaddy build --with github.com/samimishal/response-cache=.
+xcaddy build --with github.com/samishal1998/caddy-response-cache=.
 ```
 
 This produces a `./caddy` binary in the project directory.
@@ -56,7 +56,7 @@ This produces a `./caddy` binary in the project directory.
 If you want to include the plugin in an existing Caddy build from any directory:
 
 ```sh
-xcaddy build --with github.com/samimishal/response-cache@latest
+xcaddy build --with github.com/samishal1998/caddy-response-cache@latest
 ```
 
 ### Verify the module is registered

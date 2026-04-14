@@ -1,7 +1,7 @@
 .PHONY: build run test clean
 
 build:
-	xcaddy build --with github.com/samimishal/response-cache=.
+	xcaddy build --with github.com/samishal1998/caddy-response-cache=.
 
 run: build
 	./caddy run --config example/Caddyfile

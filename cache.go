@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/maypok86/otter/v2"
-	"github.com/samimishal/response-cache/storage"
+	"github.com/samishal1998/caddy-response-cache/storage"
 )
 
 // CacheStatus indicates the result of a cache lookup.
