@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,8 +25,14 @@ func init() {
 // Handler is a Caddy HTTP middleware that caches reverse proxy responses
 // using a two-layer cache: in-memory (L1) and an optional persistent backend (L2).
 type Handler struct {
-	// TTL is the cache entry time-to-live.
+	// TTL is the default cache entry time-to-live for 2xx responses.
 	TTL caddy.Duration `json:"ttl,omitempty"`
+
+	// StatusTTL holds per-status-code TTL overrides.
+	// Keys can be exact status codes ("200", "404") or classes ("2xx", "5xx").
+	// Lookup order: exact code → class → default TTL (for 2xx only).
+	// A TTL of 0 disables caching for the matching status.
+	StatusTTL map[string]caddy.Duration `json:"status_ttl,omitempty"`
 
 	// MaxBodySize is the maximum response body size (in bytes) to cache.
 	MaxBodySize int64 `json:"max_body_size,omitempty"`
@@ -142,7 +149,49 @@ func (h *Handler) Validate() error {
 	if h.MaxBodySize < 0 {
 		return fmt.Errorf("max_body_size must be positive")
 	}
+	for code, ttl := range h.StatusTTL {
+		if !isValidStatusKey(code) {
+			return fmt.Errorf("invalid status_ttl code %q: must be an exact status (e.g. 200) or class (e.g. 2xx)", code)
+		}
+		if ttl < 0 {
+			return fmt.Errorf("status_ttl for %s must not be negative", code)
+		}
+	}
 	return nil
+}
+
+// isValidStatusKey reports whether s is a valid status_ttl key:
+// either an exact HTTP status code (100-599) or a class wildcard ("1xx"-"5xx").
+func isValidStatusKey(s string) bool {
+	if len(s) == 3 && s[1] == 'x' && s[2] == 'x' {
+		return s[0] >= '1' && s[0] <= '5'
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return false
+	}
+	return n >= 100 && n <= 599
+}
+
+// resolveTTL returns the effective cache TTL for a response with the given
+// status code. It checks the exact status code first, then the class
+// (e.g. "2xx"), then falls back to the default TTL for 2xx responses.
+// Returns 0 if the response should not be cached.
+func (h *Handler) resolveTTL(status int) time.Duration {
+	if len(h.StatusTTL) > 0 {
+		if ttl, ok := h.StatusTTL[strconv.Itoa(status)]; ok {
+			return time.Duration(ttl)
+		}
+		class := fmt.Sprintf("%dxx", status/100)
+		if ttl, ok := h.StatusTTL[class]; ok {
+			return time.Duration(ttl)
+		}
+	}
+	// Default: only 2xx uses the top-level TTL.
+	if status >= 200 && status < 300 {
+		return time.Duration(h.TTL)
+	}
+	return 0
 }
 
 // Cleanup releases resources.
@@ -190,6 +239,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	// Cache miss — fetch from upstream
 	h.logger.Debug("cache miss", zap.String("key", key))
 
+	// Speculatively mark the response as Bypass. If the response ends up
+	// actually cached, we overwrite this to Miss before rec.WriteResponse()
+	// is called. Setting the header now ensures it makes it onto the wire
+	// even when the response is streamed directly (shouldBuffer=false).
+	w.Header().Set("X-Cache", "Bypass")
+
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer func() {
@@ -209,8 +264,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	}
 
 	if !rec.Buffered() {
-		// Response was streamed directly (shouldCacheResponse returned false)
-		w.Header().Set("X-Cache", "Bypass")
+		// Response was streamed directly (shouldCacheResponse returned false).
+		// X-Cache: Bypass is already on the wire.
 		return nil
 	}
 
@@ -218,18 +273,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 
 	// Check body size limit
 	if int64(len(bodyBytes)) > h.MaxBodySize {
-		w.Header().Set("X-Cache", "Bypass")
+		// Keep X-Cache: Bypass
 		return rec.WriteResponse()
 	}
 
-	// Build cache entry
+	// Build cache entry with the TTL resolved for this specific status code
+	ttl := h.resolveTTL(rec.Status())
 	now := time.Now()
+	clonedHeader := rec.Header().Clone()
+	clonedHeader.Del("X-Cache") // strip our speculative marker
 	cacheEntry := &CacheEntry{
 		StatusCode: rec.Status(),
-		Header:     rec.Header().Clone(),
+		Header:     clonedHeader,
 		Body:       make([]byte, len(bodyBytes)),
 		CreatedAt:  now,
-		ExpiresAt:  now.Add(time.Duration(h.TTL)),
+		ExpiresAt:  now.Add(ttl),
 	}
 	copy(cacheEntry.Body, bodyBytes)
 
@@ -240,7 +298,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 	}()
 
-	// Write the response to the client
+	// Overwrite Bypass → Miss now that we're actually caching
 	w.Header().Set("X-Cache", "Miss")
 	return rec.WriteResponse()
 }
@@ -297,8 +355,8 @@ func (h *Handler) isCacheableRequest(r *http.Request) bool {
 
 // shouldCacheResponse decides whether an upstream response should be cached.
 func (h *Handler) shouldCacheResponse(status int, header http.Header) bool {
-	// Only cache successful responses
-	if status < 200 || status >= 300 {
+	// No TTL for this status → don't cache
+	if h.resolveTTL(status) <= 0 {
 		return false
 	}
 

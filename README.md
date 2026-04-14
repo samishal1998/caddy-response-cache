@@ -12,6 +12,7 @@ It caches the full response (status code, headers, body), respects basic `Cache-
 - Two-layer caching: fast in-memory L1 with a persistent L2 fallback (Redis or file)
 - Automatic L1 promotion on L2 hits
 - Configurable TTL, max body size, path/method matchers, and cache key template
+- **Per-status-code TTLs** — different cache durations for success / client errors / server errors
 - `X-Cache: Hit|Miss|Bypass` response header
 - `PURGE` HTTP method to invalidate a single cached entry
 - Skips caching for `Set-Cookie`, `Cache-Control: no-store|no-cache|private`, non-2xx responses, and oversized bodies
@@ -112,11 +113,16 @@ The plugin registers a `response_cache` directive that is ordered before `revers
 
 ```caddyfile
 response_cache {
-    ttl            <duration>          # default: 5m
+    ttl            <duration>          # default: 5m (applied to 2xx)
     max_body_size  <size>              # default: 50MB
     match_path     <pattern> [<pattern>...]
     match_methods  <method> [<method>...]   # default: GET HEAD
     cache_key      <template>          # default: {method}_{host}{path}?{query}
+
+    status_ttl {
+        <code-or-class>  <duration>    # e.g. 200 10m, 404 30s, 5xx 2s
+        ...
+    }
 
     memory {
         max_items  <n>                 # L1 entry count limit
@@ -146,6 +152,54 @@ response_cache {
 | `match_path` | Glob patterns to limit which paths are cached. If omitted, all paths are candidates. | *(all paths)* |
 | `match_methods` | HTTP methods to cache. | `GET HEAD` |
 | `cache_key` | Template for generating cache keys. Placeholders: `{method}`, `{host}`, `{path}`, `{query}`, `{scheme}`. | `{method}_{host}{path}?{query}` |
+
+### `status_ttl` block (per-status-code TTL overrides)
+
+Specifies different TTLs for different HTTP status codes. Keys can be:
+
+- **Exact status codes**: `200`, `301`, `404`, `500`
+- **Class wildcards**: `1xx`, `2xx`, `3xx`, `4xx`, `5xx`
+
+**Lookup order** when resolving the TTL for a response:
+
+1. Exact status code (e.g. `404`)
+2. Class wildcard (e.g. `4xx`)
+3. Top-level `ttl` — only for 2xx responses
+4. Otherwise: not cached
+
+A TTL of `0` **disables** caching for a matching code — useful for carving out exceptions (e.g. cache all 2xx for 10 minutes but explicitly skip 202s).
+
+Example:
+
+```caddyfile
+response_cache {
+    ttl 5m                   # fallback for any 2xx not matched below
+
+    status_ttl {
+        200  1h              # exact: cache 200s for an hour
+        301  24h             # permanent redirects get a long TTL
+        404  30s             # micro-cache 404s
+        5xx  2s              # micro-cache all server errors
+    }
+
+    memory { max_items 10000 }
+}
+```
+
+Behavior with the above config:
+
+| Status | TTL source | TTL | Cached? |
+|---|---|---|---|
+| 200 | exact `200` | 1h | ✓ |
+| 204 | class `2xx` not set → default `ttl` | 5m | ✓ |
+| 301 | exact `301` | 24h | ✓ |
+| 302 | no match, not 2xx | — | ✗ (Bypass) |
+| 404 | exact `404` | 30s | ✓ |
+| 403 | no match, not 2xx | — | ✗ (Bypass) |
+| 500 | class `5xx` | 2s | ✓ |
+| 503 | class `5xx` | 2s | ✓ |
+
+**Why micro-cache errors?** A 2-second TTL on 5xx shields a failing upstream from traffic surges during incidents — instead of every client retrying and hammering the broken backend, only one request per 2-second window gets through. Same idea for 404s: avoid DB lookups for bogus paths that get scanned by bots.
 
 ### `memory` block (L1, always enabled)
 
@@ -181,12 +235,12 @@ A response is **not** cached if any of the following is true:
 
 - Request method is not in `match_methods`
 - Request path does not match any `match_path` pattern (when `match_path` is set)
-- Status code is outside `200–299`
+- `resolveTTL(status)` returns 0 — i.e. status is not 2xx and no matching entry in `status_ttl`, or there's an explicit `status_ttl { N 0 }`
 - Response has a `Set-Cookie` header
 - Response `Cache-Control` contains `no-store`, `no-cache`, or `private`
 - Response body exceeds `max_body_size`
 
-When a request is skipped, the response still includes `X-Cache: Bypass` so you can tell from the client side.
+When a request is skipped, the response includes `X-Cache: Bypass` so you can tell from the client side.
 
 ## Example configurations
 
@@ -254,6 +308,48 @@ Handy for single-node setups that still want persistence across restarts without
 }
 ```
 
+### Per-status-code TTLs
+
+Cache success normally, micro-cache errors to shield a flaky upstream:
+
+```caddyfile
+:8080 {
+    response_cache {
+        ttl 10m                  # default for 2xx
+
+        status_ttl {
+            404 1m               # cache not-founds briefly
+            5xx 2s               # micro-cache all server errors
+        }
+
+        memory { max_items 10000 }
+    }
+
+    reverse_proxy flaky-backend:8080
+}
+```
+
+Or do it per-exact-code for finer control:
+
+```caddyfile
+:8080 {
+    response_cache {
+        status_ttl {
+            200  1h              # long cache for OK
+            201  0               # never cache 201 Created
+            301  24h             # permanent redirects
+            404  5m
+            500  5s
+            503  2s              # shorter for overload
+        }
+
+        memory { max_items 5000 }
+    }
+
+    reverse_proxy backend:8080
+}
+```
+
 ### Path and method scoping
 
 Only cache the public JSON API, leaving everything else alone.
@@ -314,12 +410,17 @@ If you prefer Caddy's native JSON config, the handler module is `http.handlers.r
     "ttl": 300000000000,
     "max_body_size": 52428800,
     "match_methods": ["GET", "HEAD"],
+    "status_ttl": {
+        "200": 600000000000,
+        "404": 30000000000,
+        "5xx": 2000000000
+    },
     "memory": { "max_items": 10000 },
     "file":   { "path": "/var/cache/caddy" }
 }
 ```
 
-Durations in JSON are in nanoseconds (`300000000000` = 5 minutes).
+Durations in JSON are in nanoseconds (`300000000000` = 5 minutes, `2000000000` = 2 seconds).
 
 ## Invalidation
 

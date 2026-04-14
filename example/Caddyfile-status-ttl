@@ -1,0 +1,20 @@
+{
+	debug
+}
+
+:8080 {
+	response_cache {
+		ttl 5m
+
+		memory {
+			max_items 1000
+		}
+
+		status_ttl {
+			200 10m
+			404 30s
+			5xx 2s
+		}
+	}
+	reverse_proxy localhost:9000
+}

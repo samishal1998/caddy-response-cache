@@ -31,6 +31,12 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 //	    match_methods GET HEAD
 //	    cache_key {method}_{host}{path}?{query}
 //
+//	    status_ttl {
+//	        200 10m
+//	        404 30s
+//	        5xx 2s
+//	    }
+//
 //	    memory {
 //	        max_size 256MB
 //	        max_items 10000
@@ -91,6 +97,25 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			h.CacheKeyTemplate = d.Val()
+
+		case "status_ttl":
+			if h.StatusTTL == nil {
+				h.StatusTTL = make(map[string]caddy.Duration)
+			}
+			for d.NextBlock(1) {
+				code := d.Val()
+				if !isValidStatusKey(code) {
+					return d.Errf("invalid status_ttl code %q: must be an exact status (e.g. 200) or class (e.g. 2xx)", code)
+				}
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid status_ttl duration for %s: %v", code, err)
+				}
+				h.StatusTTL[code] = caddy.Duration(dur)
+			}
 
 		case "memory":
 			h.Memory = &MemoryConfig{}

@@ -268,6 +268,164 @@ func TestHandler_MaxBodySize(t *testing.T) {
 	}
 }
 
+func TestResolveTTL(t *testing.T) {
+	h := &Handler{
+		TTL: caddy.Duration(5 * time.Minute),
+		StatusTTL: map[string]caddy.Duration{
+			"200": caddy.Duration(1 * time.Hour),
+			"2xx": caddy.Duration(10 * time.Minute),
+			"404": caddy.Duration(30 * time.Second),
+			"5xx": caddy.Duration(2 * time.Second),
+		},
+	}
+
+	tests := []struct {
+		status int
+		want   time.Duration
+	}{
+		{200, 1 * time.Hour},     // exact match beats class
+		{201, 10 * time.Minute},  // class match (2xx)
+		{299, 10 * time.Minute},  // class match (2xx)
+		{301, 0},                 // no match, not default
+		{404, 30 * time.Second},  // exact match
+		{403, 0},                 // 4xx not configured, no fallback
+		{500, 2 * time.Second},   // class match (5xx)
+		{503, 2 * time.Second},   // class match (5xx)
+	}
+
+	for _, tt := range tests {
+		if got := h.resolveTTL(tt.status); got != tt.want {
+			t.Errorf("resolveTTL(%d) = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestResolveTTL_DefaultOnly(t *testing.T) {
+	h := &Handler{TTL: caddy.Duration(5 * time.Minute)}
+
+	tests := []struct {
+		status int
+		want   time.Duration
+	}{
+		{200, 5 * time.Minute},
+		{204, 5 * time.Minute},
+		{299, 5 * time.Minute},
+		{301, 0},
+		{404, 0},
+		{500, 0},
+	}
+
+	for _, tt := range tests {
+		if got := h.resolveTTL(tt.status); got != tt.want {
+			t.Errorf("resolveTTL(%d) = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
+func TestHandler_StatusTTL_Cache404(t *testing.T) {
+	h := newTestHandler(t)
+	h.StatusTTL = map[string]caddy.Duration{
+		"404": caddy.Duration(30 * time.Second),
+	}
+	upstream := &upstreamHandler{
+		status:  404,
+		headers: http.Header{"Content-Type": {"text/plain"}},
+		body:    "not found",
+	}
+
+	req := httptest.NewRequest("GET", "http://example.com/api/missing", nil)
+
+	// First request — miss
+	w1 := httptest.NewRecorder()
+	if err := h.ServeHTTP(w1, req, upstream); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if w1.Header().Get("X-Cache") != "Miss" {
+		t.Errorf("first: X-Cache = %q, want Miss", w1.Header().Get("X-Cache"))
+	}
+	if w1.Code != 404 {
+		t.Errorf("first: status = %d, want 404", w1.Code)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Second request — hit
+	w2 := httptest.NewRecorder()
+	if err := h.ServeHTTP(w2, req, upstream); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	if w2.Header().Get("X-Cache") != "Hit" {
+		t.Errorf("second: X-Cache = %q, want Hit", w2.Header().Get("X-Cache"))
+	}
+	if w2.Code != 404 {
+		t.Errorf("second: status = %d, want 404", w2.Code)
+	}
+	if w2.Body.String() != "not found" {
+		t.Errorf("second body: %q", w2.Body.String())
+	}
+	if upstream.called != 1 {
+		t.Errorf("upstream called %d times, want 1", upstream.called)
+	}
+}
+
+func TestHandler_StatusTTL_Cache5xxClass(t *testing.T) {
+	h := newTestHandler(t)
+	h.StatusTTL = map[string]caddy.Duration{
+		"5xx": caddy.Duration(1 * time.Minute),
+	}
+	upstream := &upstreamHandler{status: 503, body: "service unavailable"}
+
+	req := httptest.NewRequest("GET", "http://example.com/api/down", nil)
+
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, req, upstream)
+	time.Sleep(100 * time.Millisecond)
+
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req, upstream)
+	if w2.Header().Get("X-Cache") != "Hit" {
+		t.Errorf("503 should hit via 5xx class, got X-Cache = %q", w2.Header().Get("X-Cache"))
+	}
+	if upstream.called != 1 {
+		t.Errorf("upstream called %d times, want 1", upstream.called)
+	}
+}
+
+func TestHandler_StatusTTL_ZeroDisablesCaching(t *testing.T) {
+	h := newTestHandler(t)
+	h.StatusTTL = map[string]caddy.Duration{
+		"200": caddy.Duration(0), // explicitly disable caching 200
+	}
+	upstream := &upstreamHandler{status: 200, body: "ok"}
+
+	req := httptest.NewRequest("GET", "http://example.com/api/test", nil)
+
+	w1 := httptest.NewRecorder()
+	h.ServeHTTP(w1, req, upstream)
+	time.Sleep(100 * time.Millisecond)
+
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req, upstream)
+	if upstream.called != 2 {
+		t.Errorf("upstream called %d times, want 2 (200 TTL=0 should bypass)", upstream.called)
+	}
+}
+
+func TestIsValidStatusKey(t *testing.T) {
+	valid := []string{"100", "200", "404", "599", "1xx", "2xx", "3xx", "4xx", "5xx"}
+	for _, s := range valid {
+		if !isValidStatusKey(s) {
+			t.Errorf("isValidStatusKey(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{"", "0", "99", "600", "abc", "20x", "6xx", "x2x", "200x", "2XX"}
+	for _, s := range invalid {
+		if isValidStatusKey(s) {
+			t.Errorf("isValidStatusKey(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestHandler_HeadRequest(t *testing.T) {
 	h := newTestHandler(t)
 	upstream := &upstreamHandler{
