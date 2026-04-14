@@ -124,7 +124,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.logger.Info("L2 cache backend: File", zap.String("path", h.File.Path))
 	}
 
-	cache, err := NewCache(h.Memory, l2, time.Duration(h.TTL))
+	cache, err := NewCache(h.Memory, l2)
 	if err != nil {
 		return fmt.Errorf("initializing cache: %w", err)
 	}

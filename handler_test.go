@@ -33,7 +33,7 @@ func (u *upstreamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) erro
 
 func newTestHandler(t *testing.T) *Handler {
 	t.Helper()
-	c, err := NewCache(&MemoryConfig{MaxItems: 100}, nil, 5*time.Minute)
+	c, err := NewCache(&MemoryConfig{MaxItems: 100}, nil)
 	if err != nil {
 		t.Fatalf("NewCache: %v", err)
 	}

@@ -20,8 +20,8 @@ It caches the full response (status code, headers, body), respects basic `Cache-
 
 ## Requirements
 
-- Go 1.25 or newer
-- Caddy 2.5+ (tested against v2.11.2)
+- Go 1.21.5 or newer
+- Caddy 2.5+ (tested against v2.8.4)
 - [xcaddy](https://github.com/caddyserver/xcaddy) for building
 - Optional: a running Redis server for the Redis L2 backend
 
@@ -46,17 +46,21 @@ make build
 The `Makefile` wraps:
 
 ```sh
-xcaddy build --with github.com/samishal1998/caddy-response-cache=.
+xcaddy build v2.8.4 --with github.com/samishal1998/caddy-response-cache=.
 ```
 
-This produces a `./caddy` binary in the project directory.
+This produces a `./caddy` binary in the project directory. The Caddy version is pinned to `v2.8.4` because that is the latest Caddy release that builds on Go 1.21. To use a newer Caddy version (which requires a newer Go), override `CADDY_VERSION`:
+
+```sh
+make build CADDY_VERSION=v2.11.2   # requires Go 1.25+
+```
 
 ### Build against a remote version
 
 If you want to include the plugin in an existing Caddy build from any directory:
 
 ```sh
-xcaddy build --with github.com/samishal1998/caddy-response-cache@latest
+xcaddy build v2.8.4 --with github.com/samishal1998/caddy-response-cache@latest
 ```
 
 ### Verify the module is registered
