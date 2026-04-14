@@ -1,0 +1,31 @@
+{
+	# Enable debug logging to see cache hit/miss messages
+	debug
+}
+
+:8080 {
+	response_cache {
+		ttl 5m
+		max_body_size 50MB
+		match_methods GET HEAD
+
+		memory {
+			max_items 10000
+		}
+
+		# Uncomment one of the L2 backends below:
+
+		# redis {
+		#     addr localhost:6379
+		#     password ""
+		#     db 0
+		#     key_prefix cache:
+		# }
+
+		# file {
+		#     path /tmp/caddy-cache
+		# }
+	}
+
+	reverse_proxy localhost:9000
+}

@@ -1,0 +1,21 @@
+{
+	debug
+}
+
+:8080 {
+	response_cache {
+		ttl 5m
+		max_body_size 50MB
+		match_methods GET HEAD
+
+		memory {
+			max_items 100
+		}
+
+		file {
+			path /tmp/caddy-cache-test
+		}
+	}
+
+	reverse_proxy localhost:9000
+}
